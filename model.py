@@ -27,6 +27,11 @@ class Model:
         self.predict_top_indices_op, self.predict_top_scores_op, self.predict_target_strings_op = None, None, None
         self.subtoken_to_index = None
 
+        log_dir="logs"
+        os.makedirs(log_dir, exist_ok=True)
+        self.train_writer = tf.summary.FileWriter(os.path.join(log_dir, 'train'))
+        self.eval_writer = tf.summary.FileWriter(os.path.join(log_dir, 'eval'))
+
         if config.LOAD_PATH:
             self.load_model(sess=None)
         else:
@@ -74,7 +79,7 @@ class Model:
                                           node_to_index=self.node_to_index,
                                           target_to_index=self.target_to_index,
                                           config=self.config)
-        optimizer, train_loss = self.build_training_graph(self.queue_thread.get_output())
+        optimizer, train_loss, train_summary = self.build_training_graph(self.queue_thread.get_output())
         self.print_hyperparams()
         print('Number of trainable params:',
               np.sum([np.prod(v.get_shape().as_list()) for v in tf.trainable_variables()]))
@@ -92,7 +97,7 @@ class Model:
             try:
                 while True:
                     batch_num += 1
-                    _, batch_loss = self.sess.run([optimizer, train_loss])
+                    _, batch_loss, batch_summary = self.sess.run([optimizer, train_loss, train_summary])
                     sum_loss += batch_loss
                     if batch_num % self.num_batches_to_log == 0:
                         self.trace(sum_loss, batch_num, multi_batch_start_time)
@@ -101,12 +106,14 @@ class Model:
 
 
             except tf.errors.OutOfRangeError:
+                self.train_writer.add_summary(batch_summary, iteration)
                 self.epochs_trained += self.config.SAVE_EVERY_EPOCHS
                 print('Finished %d epochs' % self.config.SAVE_EVERY_EPOCHS)
-                results, precision, recall, f1 = self.evaluate()
+                results, precision, recall, f1, eval_summary = self.evaluate()
                 print('Accuracy after %d epochs: %.5f' % (self.epochs_trained, results))
                 print('After %d epochs: Precision: %.5f, recall: %.5f, F1: %.5f' % (
                     self.epochs_trained, precision, recall, f1))
+                self.eval_writer.add_summary(eval_summary, iteration)
                 if f1 > best_f1:
                     best_f1 = f1
                     best_f1_precision = precision
@@ -144,7 +151,7 @@ class Model:
                                             target_to_index=self.target_to_index,
                                             config=self.config, is_evaluating=True)
             reader_output = self.eval_queue.get_output()
-            self.eval_predicted_indices_op, self.eval_topk_values, _, _ = \
+            self.eval_predicted_indices_op, self.eval_topk_values, _, _, eval_summary_op = \
                 self.build_test_graph(reader_output)
             self.eval_true_target_strings_op = reader_output[reader.TARGET_STRING_KEY]
             self.saver = tf.train.Saver(max_to_keep=10)
@@ -176,8 +183,8 @@ class Model:
 
             try:
                 while True:
-                    predicted_indices, true_target_strings, top_values = self.sess.run(
-                        [self.eval_predicted_indices_op, self.eval_true_target_strings_op, self.eval_topk_values],
+                    predicted_indices, true_target_strings, top_values, summary = self.sess.run(
+                        [self.eval_predicted_indices_op, self.eval_true_target_strings_op, self.eval_topk_values, eval_summary_op],
                     )
                     true_target_strings = Common.binary_to_string_list(true_target_strings)
                     ref_file.write(
@@ -219,7 +226,7 @@ class Model:
         elapsed = int(time.time() - eval_start_time)
         precision, recall, f1 = self.calculate_results(true_positive, false_positive, false_negative)
         print("Evaluation time: %sh%sm%ss" % ((elapsed // 60 // 60), (elapsed // 60) % 60, elapsed % 60))
-        return num_correct_predictions / total_predictions, precision, recall, f1
+        return num_correct_predictions / total_predictions, precision, recall, f1, summary
 
     def update_correct_predictions(self, num_correct_predictions, output_file, results):
         for original_name, predicted in results:
@@ -369,7 +376,11 @@ class Model:
 
             self.saver = tf.train.Saver(max_to_keep=10)
 
-        return train_op, loss
+            with tf.name_scope('summary'):
+                tf.summary.scalar('loss',loss)
+            summary = tf.summary.merge_all()
+
+        return train_op, loss, summary
 
     def decode_outputs(self, target_words_vocab, target_input, batch_size, batched_contexts, valid_mask,
                        is_evaluating=False):
@@ -549,6 +560,17 @@ class Model:
                                                         batched_contexts=batched_contexts, valid_mask=valid_mask,
                                                         is_evaluating=True)
 
+            batch_size = tf.shape(target_index)[0]
+            logits = outputs.rnn_output  # (batch, max_output_length, dim * 2 + rnn_size)
+            crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_index, logits=logits)
+            target_words_nonzero = tf.sequence_mask(path_target_lengths + 1,
+                                                    maxlen=self.config.MAX_TARGET_PARTS + 1, dtype=tf.float32)
+            loss = tf.reduce_sum(crossent * target_words_nonzero) / tf.to_float(batch_size)
+            # loss = tf.constant(1, shape=(1, 1), dtype=tf.float32)
+            with tf.name_scope('summary'):
+                    tf.summary.scalar('loss', loss)
+            summary = tf.summary.merge_all()
+
         if self.config.BEAM_WIDTH > 0:
             predicted_indices = outputs.predicted_ids
             topk_values = outputs.beam_search_decoder_output.scores
@@ -558,7 +580,7 @@ class Model:
             topk_values = tf.constant(1, shape=(1, 1), dtype=tf.float32)
             attention_weights = tf.squeeze(final_states.alignment_history.stack(), 1)
 
-        return predicted_indices, topk_values, target_index, attention_weights
+        return predicted_indices, topk_values, target_index, attention_weights, summary
 
     def predict(self, predict_data_lines):
         if self.predict_queue is None:
@@ -569,7 +591,7 @@ class Model:
             self.predict_placeholder = tf.placeholder(tf.string)
             reader_output = self.predict_queue.process_from_placeholder(self.predict_placeholder)
             reader_output = {key: tf.expand_dims(tensor, 0) for key, tensor in reader_output.items()}
-            self.predict_top_indices_op, self.predict_top_scores_op, _, self.attention_weights_op = \
+            self.predict_top_indices_op, self.predict_top_scores_op, _, self.attention_weights_op, _ = \
                 self.build_test_graph(reader_output)
             self.predict_source_string = reader_output[reader.PATH_SOURCE_STRINGS_KEY]
             self.predict_path_string = reader_output[reader.PATH_STRINGS_KEY]

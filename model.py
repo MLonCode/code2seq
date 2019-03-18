@@ -185,7 +185,7 @@ class Model:
             print('Start testing')
             try:
                 while True:
-                    #print('...iter %d' % total_prediction_batches)
+                    print('...iter %d' % total_prediction_batches)
                     predicted_indices, true_target_strings, top_values, train_summary = self.sess.run(
                         [self.eval_predicted_indices_op, self.eval_true_target_strings_op, self.eval_topk_values, self.eval_summary_op],
                     )
@@ -409,7 +409,7 @@ class Model:
             memory=batched_contexts
         )
         # TF doesn't support beam search with alignment history
-        should_save_alignment_history = is_evaluating and self.config.BEAM_WIDTH == 0
+        should_save_alignment_history = False #is_evaluating and self.config.BEAM_WIDTH == 0
         decoder_cell = tf.contrib.seq2seq.AttentionWrapper(decoder_cell, attention_mechanism,
                                                            attention_layer_size=self.config.DECODER_SIZE,
                                                            alignment_history=should_save_alignment_history)
@@ -430,6 +430,7 @@ class Model:
                     length_penalty_weight=0.0)
             else:
                 helper = tf.contrib.seq2seq.GreedyEmbeddingHelper(target_words_vocab, start_fill, 0)
+                #decoder_cell = tf.contrib.rnn.OutputProjectionWrapper(decoder_cell, tf.shape(target_words_vocab), reuse=True)
                 initial_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=fake_encoder_state)
                 decoder = tf.contrib.seq2seq.BasicDecoder(cell=decoder_cell, helper=helper, initial_state=initial_state,
                                                           output_layer=projection_layer)
@@ -445,9 +446,9 @@ class Model:
                                                            self.config.MAX_TARGET_PARTS + 1))
 
             initial_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=fake_encoder_state)
-
             decoder = tf.contrib.seq2seq.BasicDecoder(cell=decoder_cell, helper=helper, initial_state=initial_state,
                                                       output_layer=projection_layer)
+            #(batch, max_output_length, dim * 2 + rnn_size)
         outputs, final_states, final_sequence_lengths = tf.contrib.seq2seq.dynamic_decode(decoder,
                                                                                           maximum_iterations=self.config.MAX_TARGET_PARTS + 1)
         return outputs, final_states
@@ -549,7 +550,7 @@ class Model:
             nodes_vocab = tf.get_variable('NODES_VOCAB',
                                           shape=(self.nodes_vocab_size, self.config.EMBEDDINGS_SIZE),
                                           dtype=tf.float32, trainable=False)
-
+            # (batch, max_contexts, decoder_size)
             batched_contexts = self.compute_contexts(subtoken_vocab=subtoken_vocab, nodes_vocab=nodes_vocab,
                                                      source_input=path_source_indices, nodes_input=node_indices,
                                                      target_input=path_target_indices,
@@ -558,12 +559,13 @@ class Model:
                                                      path_lengths=path_lengths, path_target_lengths=path_target_lengths,
                                                      is_evaluating=True)
 
+            batch_size = tf.shape(target_index)[0]
             outputs, final_states = self.decode_outputs(target_words_vocab=target_words_vocab,
-                                                        target_input=target_index, batch_size=tf.shape(target_index)[0],
-                                                        batched_contexts=batched_contexts, valid_mask=valid_mask,
+                                                        target_input=target_index, batch_size=batch_size,
+                                                        batched_contexts=batched_contexts,
+                                                        valid_mask=valid_mask,
                                                         is_evaluating=True)
 
-            batch_size = tf.shape(target_index)[0]
             logits = outputs.rnn_output  # (batch, max_output_length, dim * 2 + rnn_size)
             crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_index, logits=logits)
             target_words_nonzero = tf.sequence_mask(path_target_lengths + 1,
@@ -580,7 +582,9 @@ class Model:
         else:
             predicted_indices = outputs.sample_id
             topk_values = tf.constant(1, shape=(1, 1), dtype=tf.float32)
-            attention_weights = tf.squeeze(final_states.alignment_history.stack(), 1)
+            #attention_weights = tf.squeeze(final_states.alignment_history.stack(), 1)
+            # as we do not keep alignment_history in AttentionWrapper any more
+            attention_weights = [tf.no_op()]
 
         return predicted_indices, topk_values, target_index, attention_weights, test_summary
 

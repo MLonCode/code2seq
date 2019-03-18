@@ -30,8 +30,7 @@ class Model:
         log_dir="logs"
         os.makedirs(log_dir, exist_ok=True)
         self.train_writer = tf.summary.FileWriter(os.path.join(log_dir, 'train'), graph=self.sess.graph)
-        self.eval_writer = tf.summary.FileWriter(os.path.join(log_dir, 'eval'), graph=self.sess.graph)
-        self.eval_summary_op = None
+        self.eval_writer = tf.summary.FileWriter(os.path.join(log_dir, 'eval'))
 
         if config.LOAD_PATH:
             self.load_model(sess=None)
@@ -145,7 +144,6 @@ class Model:
                                                                                   multi_batch_elapsed if multi_batch_elapsed > 0 else 1)))
 
     def evaluate(self, release=False):
-        summary = None
         eval_start_time = time.time()
         if self.eval_queue is None:
             self.eval_queue = reader.Reader(subtoken_to_index=self.subtoken_to_index,
@@ -187,7 +185,7 @@ class Model:
             try:
                 while True:
                     print('...iter %d' % total_prediction_batches)
-                    predicted_indices, true_target_strings, top_values, summary = self.sess.run(
+                    predicted_indices, true_target_strings, top_values, train_summary = self.sess.run(
                         [self.eval_predicted_indices_op, self.eval_true_target_strings_op, self.eval_topk_values, self.eval_summary_op],
                     )
                     assert len(true_target_strings) != 0 , "Empty true_target_strings :/"
@@ -231,7 +229,7 @@ class Model:
         elapsed = int(time.time() - eval_start_time)
         precision, recall, f1 = self.calculate_results(true_positive, false_positive, false_negative)
         print("Evaluation time: %sh%sm%ss" % ((elapsed // 60 // 60), (elapsed // 60) % 60, elapsed % 60))
-        return num_correct_predictions / total_predictions, precision, recall, f1, summary
+        return num_correct_predictions / total_predictions, precision, recall, f1, train_summary
 
     def update_correct_predictions(self, num_correct_predictions, output_file, results):
         for original_name, predicted in results:
@@ -382,9 +380,9 @@ class Model:
             self.saver = tf.train.Saver(max_to_keep=10)
 
             #with tf.name_scope('summary'):
-            tf.summary.scalar('loss', loss)
+            train_summary = tf.summary.scalar('loss', loss)
 
-        return train_op, loss, tf.summary.merge_all()
+        return train_op, loss, train_summary
 
     def decode_outputs(self, target_words_vocab, target_input, batch_size, batched_contexts, valid_mask,
                        is_evaluating=False):
@@ -564,15 +562,15 @@ class Model:
                                                         batched_contexts=batched_contexts, valid_mask=valid_mask,
                                                         is_evaluating=True)
 
-            # batch_size = tf.shape(target_index)[0]
-            # logits = outputs.rnn_output  # (batch, max_output_length, dim * 2 + rnn_size)
-            # crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_index, logits=logits)
-            # target_words_nonzero = tf.sequence_mask(path_target_lengths + 1,
-            #                                         maxlen=self.config.MAX_TARGET_PARTS + 1, dtype=tf.float32)
-            # loss = tf.reduce_sum(crossent * target_words_nonzero) / tf.to_float(batch_size)
-            test_loss = tf.constant(1, shape=(1, 1), dtype=tf.float32)
+            batch_size = tf.shape(target_index)[0]
+            logits = outputs.rnn_output  # (batch, max_output_length, dim * 2 + rnn_size)
+            crossent = tf.nn.sparse_softmax_cross_entropy_with_logits(labels=target_index, logits=logits)
+            target_words_nonzero = tf.sequence_mask(path_target_lengths + 1,
+                                                    maxlen=self.config.MAX_TARGET_PARTS + 1, dtype=tf.float32)
+            test_loss = tf.reduce_sum(crossent * target_words_nonzero) / tf.to_float(batch_size)
+            # test_loss = tf.constant(1, shape=(1, 1), dtype=tf.float32)
             #with tf.name_scope('summary'):
-            tf.summary.scalar('loss', test_loss)
+            test_summary = tf.summary.scalar('loss', test_loss)
 
         if self.config.BEAM_WIDTH > 0:
             predicted_indices = outputs.predicted_ids
@@ -583,7 +581,7 @@ class Model:
             topk_values = tf.constant(1, shape=(1, 1), dtype=tf.float32)
             attention_weights = tf.squeeze(final_states.alignment_history.stack(), 1)
 
-        return predicted_indices, topk_values, target_index, attention_weights, tf.summary.merge_all()
+        return predicted_indices, topk_values, target_index, attention_weights, test_summary
 
     def predict(self, predict_data_lines):
         if self.predict_queue is None:

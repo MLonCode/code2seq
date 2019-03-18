@@ -27,10 +27,8 @@ class Model:
         self.predict_top_indices_op, self.predict_top_scores_op, self.predict_target_strings_op = None, None, None
         self.subtoken_to_index = None
 
-        log_dir="logs"
-        os.makedirs(log_dir, exist_ok=True)
-        self.train_writer = tf.summary.FileWriter(os.path.join(log_dir, 'train'), graph=self.sess.graph)
-        self.eval_writer = tf.summary.FileWriter(os.path.join(log_dir, 'eval'))
+        self.log_dir="logs"
+        os.makedirs(self.log_dir, exist_ok=True)
 
         if config.LOAD_PATH:
             self.load_model(sess=None)
@@ -87,6 +85,9 @@ class Model:
         print('Initalized variables')
         if self.config.LOAD_PATH:
             self.load_model(self.sess)
+
+        self.train_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'train'), graph=self.sess.graph)
+        self.eval_writer = tf.summary.FileWriter(os.path.join(self.log_dir, 'eval'), graph=self.sess.graph)
 
         time.sleep(1)
         print('Started reader...')
@@ -184,7 +185,7 @@ class Model:
             print('Start testing')
             try:
                 while True:
-                    print('...iter %d' % total_prediction_batches)
+                    #print('...iter %d' % total_prediction_batches)
                     predicted_indices, true_target_strings, top_values, train_summary = self.sess.run(
                         [self.eval_predicted_indices_op, self.eval_true_target_strings_op, self.eval_topk_values, self.eval_summary_op],
                     )
@@ -568,7 +569,7 @@ class Model:
             target_words_nonzero = tf.sequence_mask(path_target_lengths + 1,
                                                     maxlen=self.config.MAX_TARGET_PARTS + 1, dtype=tf.float32)
             test_loss = tf.reduce_sum(crossent * target_words_nonzero) / tf.to_float(batch_size)
-            # test_loss = tf.constant(1, shape=(1, 1), dtype=tf.float32)
+            # test_loss = tf.constant(1, dtype=tf.float32)
             #with tf.name_scope('summary'):
             test_summary = tf.summary.scalar('loss', test_loss)
 
